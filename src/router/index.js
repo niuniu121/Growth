@@ -11,6 +11,7 @@ import DailyReflectionView from "../views/DailyReflectionView.vue";
 import WeeklyReviewView from "../views/WeeklyReviewView.vue";
 import AiCoachView from "../views/AiCoachView.vue";
 import SettingsView from "../views/SettingsView.vue";
+import StudyHub from "../views/StudyHub.vue";
 
 const routes = [
     {
@@ -62,6 +63,11 @@ const routes = [
                 path: "settings",
                 name: "Settings",
                 component: SettingsView,
+            },
+            {
+                path: "/study-hub",
+                name: "study-hub",
+                component: StudyHub,
             },
         ],
     },

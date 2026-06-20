@@ -7,9 +7,27 @@ const collapsed = ref(false);
 const navItems = [
   { path: "/calendar", label: "Calendar", zh: "日历", icon: "📅" },
   { path: "/workspaces", label: "Workspaces", zh: "工作区", icon: "🗂️" },
+
+  {
+    path: "/study-hub",
+    label: "Study Hub",
+    zh: "学习中心",
+    icon: "🧠",
+  },
+
   { path: "/tasks", label: "Tasks", zh: "任务", icon: "✅" },
-  { path: "/time-tracker", label: "Time Tracker", zh: "时间记录", icon: "⏱️" },
-  { path: "/learning-log", label: "Learning Log", zh: "学习日志", icon: "📚" },
+  {
+    path: "/time-tracker",
+    label: "Time Tracker",
+    zh: "时间记录",
+    icon: "⏱️",
+  },
+  {
+    path: "/learning-log",
+    label: "Learning Log",
+    zh: "学习日志",
+    icon: "📚",
+  },
   {
     path: "/daily-reflection",
     label: "Daily Reflection",
@@ -22,7 +40,12 @@ const navItems = [
     zh: "每周总结",
     icon: "📊",
   },
-  { path: "/ai-coach", label: "AI Coach", zh: "AI 教练", icon: "🤖" },
+  {
+    path: "/ai-coach",
+    label: "AI Coach",
+    zh: "AI 教练",
+    icon: "🤖",
+  },
 ];
 </script>
 
@@ -39,7 +62,12 @@ const navItems = [
           </div>
         </div>
 
-        <button class="collapse-btn" @click="collapsed = !collapsed">
+        <button
+          type="button"
+          class="collapse-btn"
+          :aria-label="collapsed ? 'Expand sidebar' : 'Collapse sidebar'"
+          @click="collapsed = !collapsed"
+        >
           {{ collapsed ? "→" : "←" }}
         </button>
       </div>
@@ -50,7 +78,7 @@ const navItems = [
           :key="item.path"
           :to="item.path"
           class="nav-item"
-          :title="collapsed ? item.label : ''"
+          :title="collapsed ? `${item.label} · ${item.zh}` : ''"
         >
           <span class="nav-icon">{{ item.icon }}</span>
 
@@ -81,7 +109,9 @@ const navItems = [
   background: #0f172a;
   color: white;
   padding: 22px;
-  transition: width 0.22s ease;
+  transition:
+    width 0.22s ease,
+    padding 0.22s ease;
   box-sizing: border-box;
 }
 
@@ -117,17 +147,23 @@ const navItems = [
   flex-shrink: 0;
 }
 
+.brand-text {
+  min-width: 0;
+}
+
 .brand-text h2 {
   margin: 0;
   font-size: 22px;
   color: white;
   line-height: 1.1;
+  white-space: nowrap;
 }
 
 .brand-text p {
   margin: 5px 0 0;
   font-size: 12px;
   color: #cbd5e1;
+  white-space: nowrap;
 }
 
 .collapse-btn {
@@ -138,12 +174,23 @@ const navItems = [
   background: #1e293b;
   color: #e5e7eb;
   font-weight: 900;
+  cursor: pointer;
+  transition: 0.18s ease;
+}
+
+.collapse-btn:hover {
+  background: #334155;
+  color: white;
+}
+
+.app-layout.collapsed .sidebar-top {
+  flex-direction: column;
+  gap: 10px;
 }
 
 .app-layout.collapsed .collapse-btn {
   margin-left: auto;
   margin-right: auto;
-  margin-top: 12px;
 }
 
 nav {
@@ -160,7 +207,10 @@ nav {
   border-radius: 15px;
   color: #cbd5e1;
   text-decoration: none;
-  transition: 0.18s;
+  transition:
+    background 0.18s ease,
+    color 0.18s ease,
+    transform 0.18s ease;
 }
 
 .app-layout.collapsed .nav-item {
@@ -168,7 +218,16 @@ nav {
   padding: 13px 0;
 }
 
-.nav-item:hover,
+.nav-item:hover {
+  background: #1e293b;
+  color: white;
+  transform: translateX(2px);
+}
+
+.app-layout.collapsed .nav-item:hover {
+  transform: none;
+}
+
 .nav-item.router-link-active {
   background: #1e293b;
   color: white;
@@ -183,6 +242,7 @@ nav {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
 }
 
 .nav-label strong {
@@ -205,5 +265,34 @@ nav {
   overflow-y: auto;
   padding: 24px;
   box-sizing: border-box;
+}
+
+@media (max-width: 760px) {
+  .sidebar {
+    width: 88px;
+    padding: 18px 14px;
+  }
+
+  .sidebar-top {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .brand-text {
+    display: none;
+  }
+
+  .nav-item {
+    justify-content: center;
+    padding: 13px 0;
+  }
+
+  .nav-label {
+    display: none;
+  }
+
+  .main-content {
+    padding: 16px;
+  }
 }
 </style>

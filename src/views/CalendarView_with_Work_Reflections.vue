@@ -154,11 +154,7 @@ const groupMeta = {
 const newEvent = ref(createEmptyEvent());
 const categoryForm = ref(createEmptyCategory());
 
-function createEmptyEvent(
-  date = selectedDate.value,
-  startTime = "",
-  endTime = "",
-) {
+function createEmptyEvent(date = selectedDate.value, startTime = "", endTime = "") {
   return {
     title: "",
     categoryId: "",
@@ -284,9 +280,7 @@ function getCategoryMeta(categoryIdOrSlug) {
 }
 
 function getEventCategory(event) {
-  return getCategoryMeta(
-    event.categoryId || event.category || event.categorySlug,
-  );
+  return getCategoryMeta(event.categoryId || event.category || event.categorySlug);
 }
 
 function getEventDuration(event) {
@@ -361,16 +355,10 @@ function buildReport(targetEvents) {
     if (event.status === "done") categoryMap[categoryKey].done += 1;
   });
 
-  const groupRows = Object.values(groupMap).sort(
-    (a, b) => b.minutes - a.minutes,
-  );
-  const categoryRows = Object.values(categoryMap).sort(
-    (a, b) => b.minutes - a.minutes,
-  );
+  const groupRows = Object.values(groupMap).sort((a, b) => b.minutes - a.minutes);
+  const categoryRows = Object.values(categoryMap).sort((a, b) => b.minutes - a.minutes);
   const totalMinutes = groupRows.reduce((sum, item) => sum + item.minutes, 0);
-  const doneCount = targetEvents.filter(
-    (event) => event.status === "done",
-  ).length;
+  const doneCount = targetEvents.filter((event) => event.status === "done").length;
 
   return {
     totalMinutes,
@@ -407,33 +395,23 @@ function buildLocalAiAdvice(report, periodName) {
   }
 
   if ((workGroup?.minutes || 0) > report.totalMinutes * 0.6) {
-    lines.push(
-      "工作占比偏高，容易出现“很忙但成长不足”。建议给 CCL / Teaching / IT 留一个不可移动学习块。",
-    );
+    lines.push("工作占比偏高，容易出现“很忙但成长不足”。建议给 CCL / Teaching / IT 留一个不可移动学习块。");
   }
 
   if ((studyGroup?.minutes || 0) < 60 && report.totalMinutes >= 240) {
-    lines.push(
-      "学习时间偏少。建议至少安排 45–60 分钟学习，不要等别人 push 你。",
-    );
+    lines.push("学习时间偏少。建议至少安排 45–60 分钟学习，不要等别人 push 你。");
   }
 
   if ((restGroup?.minutes || 0) === 0 && report.totalMinutes >= 300) {
-    lines.push(
-      "休息/睡眠记录为 0。建议把睡眠和恢复也作为正式时间块记录，否则数据会失真。",
-    );
+    lines.push("休息/睡眠记录为 0。建议把睡眠和恢复也作为正式时间块记录，否则数据会失真。");
   }
 
   if ((healthGroup?.minutes || 0) >= 45) {
-    lines.push(
-      "健康/健身有记录，这是一个很好的稳定器。保持即可，不需要过度加量。",
-    );
+    lines.push("健康/健身有记录，这是一个很好的稳定器。保持即可，不需要过度加量。");
   }
 
   if ((lifeGroup?.minutes || 0) > report.totalMinutes * 0.35) {
-    lines.push(
-      "生活/娱乐占比不低。如果你觉得学习不够，优先从这里挪 30 分钟给学习。",
-    );
+    lines.push("生活/娱乐占比不低。如果你觉得学习不够，优先从这里挪 30 分钟给学习。");
   }
 
   return lines.join(" ");
@@ -463,19 +441,12 @@ function buildLocalReportText(type) {
     const percent = report.totalMinutes
       ? Math.round((item.minutes / report.totalMinutes) * 100)
       : 0;
-    lines.push(
-      `- ${item.label}（${item.zh}）：${formatMinutes(item.minutes)}，${percent}%`,
-    );
+    lines.push(`- ${item.label}（${item.zh}）：${formatMinutes(item.minutes)}，${percent}%`);
   });
 
   lines.push("");
   lines.push("建议：");
-  lines.push(
-    buildLocalAiAdvice(
-      report,
-      type === "daily" ? "Daily Report" : "Weekly Report",
-    ),
-  );
+  lines.push(buildLocalAiAdvice(report, type === "daily" ? "Daily Report" : "Weekly Report"));
 
   return lines.join("\n");
 }
@@ -510,9 +481,7 @@ const weekStartKey = computed(() => {
 });
 
 const weekEndKey = computed(() => {
-  return formatDateKey(
-    addDays(getStartOfWeek(parseDateKey(selectedDate.value)), 6),
-  );
+  return formatDateKey(addDays(getStartOfWeek(parseDateKey(selectedDate.value)), 6));
 });
 
 const todayEvents = computed(() => getEventsByDate(todayKey.value));
@@ -543,15 +512,13 @@ const selectedDateReflectionEvents = computed(() => {
       event.reflection?.progress ||
       event.reflection?.shortcomings ||
       event.reflection?.learning ||
-      event.reflection?.nextSteps,
+      event.reflection?.nextSteps
     ),
   }));
 });
 
 const reflectionCompletedCount = computed(() => {
-  return selectedDateReflectionEvents.value.filter(
-    (event) => event.hasReflection,
-  ).length;
+  return selectedDateReflectionEvents.value.filter((event) => event.hasReflection).length;
 });
 
 const weeklyEvents = computed(() => {
@@ -582,9 +549,7 @@ const weeklyChartSeries = computed(() =>
 );
 
 const dailyChartOptions = computed(() => buildChartOptions(dailyReport.value));
-const weeklyChartOptions = computed(() =>
-  buildChartOptions(weeklyReport.value),
-);
+const weeklyChartOptions = computed(() => buildChartOptions(weeklyReport.value));
 
 const copiedEventLabel = computed(() => {
   if (!copiedEventTemplate.value) return "";
@@ -733,8 +698,7 @@ function loadEvents() {
 
 function openAddForm(date = selectedDate.value, startTime = "", endTime = "") {
   const defaultCategory =
-    categories.value.find((item) => item.slug === "study") ||
-    categories.value[0];
+    categories.value.find((item) => item.slug === "study") || categories.value[0];
 
   newEvent.value = createEmptyEvent(date, startTime, endTime);
   newEvent.value.categoryId = defaultCategory?.id || "";
@@ -820,9 +784,7 @@ async function saveCategory() {
 
 async function removeCategory(category) {
   if (isCategoryUsed(category)) {
-    alert(
-      "This category is used by existing events. Please change those events first.",
-    );
+    alert("This category is used by existing events. Please change those events first.");
     return;
   }
 
@@ -969,10 +931,7 @@ function copyEventTemplate(event) {
   const template = buildEventTemplate(event);
   copiedEventTemplate.value = template;
 
-  localStorage.setItem(
-    "growthos_copied_event_template",
-    JSON.stringify(template),
-  );
+  localStorage.setItem("growthos_copied_event_template", JSON.stringify(template));
 
   alert(`Copied: ${template.title || "Untitled event"}`);
 }
@@ -1091,6 +1050,7 @@ async function pasteCopiedTemplateToSelectedDate() {
   alert(`Pasted to ${selectedDate.value}`);
 }
 
+
 function openReflection(event) {
   reflectionEvent.value = { ...event };
   reflectionForm.value = {
@@ -1117,7 +1077,7 @@ function hasReflectionContent() {
     value.progress.trim() ||
     value.shortcomings.trim() ||
     value.learning.trim() ||
-    value.nextSteps.trim(),
+    value.nextSteps.trim()
   );
 }
 
@@ -1189,9 +1149,7 @@ function buildLocalReflectionAnalysis(payload) {
   if (r.rating >= 4) {
     lines.push("整体完成度不错，你对这次工作的掌控感较强。");
   } else if (r.rating <= 2) {
-    lines.push(
-      "这次工作的完成感偏低，建议先区分：是准备不足、执行受阻，还是目标本身不清晰。",
-    );
+    lines.push("这次工作的完成感偏低，建议先区分：是准备不足、执行受阻，还是目标本身不清晰。");
   } else {
     lines.push("整体表现中等，已经有可保留的部分，也有明确的优化空间。");
   }
@@ -1199,17 +1157,13 @@ function buildLocalReflectionAnalysis(payload) {
   if (r.progress) {
     lines.push(`值得保留：${r.progress}`);
   } else {
-    lines.push(
-      "值得保留：下次至少记录一个具体做得好的动作，避免复盘只看不足。",
-    );
+    lines.push("值得保留：下次至少记录一个具体做得好的动作，避免复盘只看不足。");
   }
 
   if (r.shortcomings) {
     lines.push(`需要改善：${r.shortcomings}`);
   } else {
-    lines.push(
-      "需要改善：目前不足描述较少，可以从准备、沟通、时间控制、结果质量四个方向补充。",
-    );
+    lines.push("需要改善：目前不足描述较少，可以从准备、沟通、时间控制、结果质量四个方向补充。");
   }
 
   if (r.learning) {
@@ -1219,14 +1173,10 @@ function buildLocalReflectionAnalysis(payload) {
   if (r.nextSteps) {
     lines.push(`下一步：${r.nextSteps}`);
   } else {
-    lines.push(
-      "下一步：把一个改进点转成下一次工作前可执行的动作，例如提前准备清单、设置完成标准或预留检查时间。",
-    );
+    lines.push("下一步：把一个改进点转成下一次工作前可执行的动作，例如提前准备清单、设置完成标准或预留检查时间。");
   }
 
-  lines.push(
-    "建议你下次复盘时继续使用“事实 → 原因 → 调整动作”的结构，会比单纯评价自己更有效。",
-  );
+  lines.push("建议你下次复盘时继续使用“事实 → 原因 → 调整动作”的结构，会比单纯评价自己更有效。");
 
   return lines.join("\n\n");
 }
@@ -1259,11 +1209,8 @@ async function analyzeReflection() {
     await saveReflection({ keepOpen: true });
   } catch (error) {
     console.error(error);
-    aiError.value =
-      "AI reflection analysis failed. Using local analysis instead.";
-    reflectionAiResult.value = buildLocalReflectionAnalysis(
-      buildReflectionPayload(),
-    );
+    aiError.value = "AI reflection analysis failed. Using local analysis instead.";
+    reflectionAiResult.value = buildLocalReflectionAnalysis(buildReflectionPayload());
     await saveReflection({ keepOpen: true });
   } finally {
     reflectionAiLoading.value = false;
@@ -1272,8 +1219,7 @@ async function analyzeReflection() {
 
 function getAiPayload(type) {
   const report = type === "daily" ? dailyReport.value : weeklyReport.value;
-  const targetEvents =
-    type === "daily" ? selectedDateEvents.value : weeklyEvents.value;
+  const targetEvents = type === "daily" ? selectedDateEvents.value : weeklyEvents.value;
 
   return {
     type,
@@ -1448,14 +1394,10 @@ function buildLocalCoachAnswer(question) {
 
   lines.push(`你问的是：“${question}”`);
   lines.push("");
-  lines.push(
-    `从本周数据看，你一共记录了 ${formatMinutes(report.totalMinutes)}。`,
-  );
+  lines.push(`从本周数据看，你一共记录了 ${formatMinutes(report.totalMinutes)}。`);
 
   if (topGroup) {
-    lines.push(
-      `目前占比最高的是 ${topGroup.label}（${topGroup.zh}）：${formatMinutes(topGroup.minutes)}。`,
-    );
+    lines.push(`目前占比最高的是 ${topGroup.label}（${topGroup.zh}）：${formatMinutes(topGroup.minutes)}。`);
   }
 
   lines.push(buildLocalAiAdvice(report, "Weekly Coach"));
@@ -1609,11 +1551,7 @@ onUnmounted(() => {
               class="collapse-btn"
               @click="upcomingExpanded = !upcomingExpanded"
             >
-              {{
-                upcomingExpanded
-                  ? "Collapse"
-                  : `Show all (${upcomingEvents.length})`
-              }}
+              {{ upcomingExpanded ? "Collapse" : `Show all (${upcomingEvents.length})` }}
               <span :class="{ rotated: upcomingExpanded }">⌄</span>
             </button>
           </div>
@@ -1688,6 +1626,7 @@ onUnmounted(() => {
       </section>
     </div>
 
+
     <section class="reflection-section">
       <div class="reflection-header">
         <div>
@@ -1699,24 +1638,14 @@ onUnmounted(() => {
         </div>
 
         <div class="reflection-progress">
-          <strong
-            >{{ reflectionCompletedCount }}/{{
-              selectedDateReflectionEvents.length
-            }}</strong
-          >
+          <strong>{{ reflectionCompletedCount }}/{{ selectedDateReflectionEvents.length }}</strong>
           <span>reflections completed</span>
         </div>
       </div>
 
-      <div
-        v-if="selectedDateReflectionEvents.length === 0"
-        class="empty-state small"
-      >
+      <div v-if="selectedDateReflectionEvents.length === 0" class="empty-state small">
         <strong>No work or task on this date</strong>
-        <span
-          >Add an event in Calendar first. It will appear here
-          automatically.</span
-        >
+        <span>Add an event in Calendar first. It will appear here automatically.</span>
       </div>
 
       <div v-else class="reflection-list">
@@ -1729,10 +1658,7 @@ onUnmounted(() => {
           <div class="reflection-card-top">
             <div
               class="reflection-event-icon"
-              :style="{
-                backgroundColor: `${getEventCategory(event).color}18`,
-                color: getEventCategory(event).color,
-              }"
+              :style="{ backgroundColor: `${getEventCategory(event).color}18`, color: getEventCategory(event).color }"
             >
               {{ getEventCategory(event).icon }}
             </div>
@@ -1740,13 +1666,7 @@ onUnmounted(() => {
             <div class="reflection-card-main">
               <div class="reflection-title-row">
                 <h3>{{ event.title }}</h3>
-                <span
-                  :class="
-                    event.hasReflection
-                      ? 'reflection-done'
-                      : 'reflection-pending'
-                  "
-                >
+                <span :class="event.hasReflection ? 'reflection-done' : 'reflection-pending'">
                   {{ event.hasReflection ? "Reflected" : "To reflect" }}
                 </span>
               </div>
@@ -1789,11 +1709,7 @@ onUnmounted(() => {
           </div>
 
           <div class="report-actions">
-            <button
-              class="secondary-btn"
-              :disabled="aiLoading"
-              @click="generateAiReport('daily')"
-            >
+            <button class="secondary-btn" :disabled="aiLoading" @click="generateAiReport('daily')">
               {{ aiLoading ? "Generating..." : "Generate" }}
             </button>
 
@@ -1836,11 +1752,7 @@ onUnmounted(() => {
           </div>
 
           <div class="report-actions">
-            <button
-              class="secondary-btn"
-              :disabled="aiLoading"
-              @click="generateAiReport('weekly')"
-            >
+            <button class="secondary-btn" :disabled="aiLoading" @click="generateAiReport('weekly')">
               {{ aiLoading ? "Generating..." : "Generate" }}
             </button>
 
@@ -1880,10 +1792,7 @@ onUnmounted(() => {
       <div class="report-header">
         <div>
           <h2>Ask AI Coach</h2>
-          <p>
-            Ask about your schedule, study consistency, work pressure, and
-            growth direction.
-          </p>
+          <p>Ask about your schedule, study consistency, work pressure, and growth direction.</p>
         </div>
 
         <span class="ai-mode-pill">
@@ -1930,7 +1839,9 @@ onUnmounted(() => {
           <div>
             <span>New Event</span>
             <h2>Add something to your day</h2>
-            <p v-if="copiedEventTemplate">Copied: {{ copiedEventLabel }}</p>
+            <p v-if="copiedEventTemplate">
+              Copied: {{ copiedEventLabel }}
+            </p>
           </div>
 
           <div class="modal-header-actions">
@@ -2017,7 +1928,9 @@ onUnmounted(() => {
           <div>
             <span>Event Detail</span>
             <h2>Edit your event</h2>
-            <p v-if="copiedEventTemplate">Copied: {{ copiedEventLabel }}</p>
+            <p v-if="copiedEventTemplate">
+              Copied: {{ copiedEventLabel }}
+            </p>
           </div>
 
           <div class="modal-header-actions">
@@ -2031,9 +1944,7 @@ onUnmounted(() => {
             >
               Paste
             </button>
-            <button class="close-btn" @click="showEventDetail = false">
-              ×
-            </button>
+            <button class="close-btn" @click="showEventDetail = false">×</button>
           </div>
         </div>
 
@@ -2103,22 +2014,13 @@ onUnmounted(() => {
         </div>
 
         <div class="quick-actions">
-          <button
-            class="copy-btn"
-            @click="duplicateEventToTomorrow(selectedEvent)"
-          >
+          <button class="copy-btn" @click="duplicateEventToTomorrow(selectedEvent)">
             + Tomorrow
           </button>
-          <button
-            class="copy-btn"
-            @click="duplicateEventToNextWeek(selectedEvent)"
-          >
+          <button class="copy-btn" @click="duplicateEventToNextWeek(selectedEvent)">
             + Next Week
           </button>
-          <button
-            class="copy-btn"
-            @click="duplicateEventToSelectedDate(selectedEvent)"
-          >
+          <button class="copy-btn" @click="duplicateEventToSelectedDate(selectedEvent)">
             + Selected Date
           </button>
           <button class="copy-btn" @click="toggleDone(selectedEvent)">
@@ -2143,10 +2045,8 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div
-      v-if="showReflectionModal && reflectionEvent"
-      class="modal-backdrop reflection-layer"
-    >
+
+    <div v-if="showReflectionModal && reflectionEvent" class="modal-backdrop reflection-layer">
       <div class="reflection-modal">
         <div class="modal-header">
           <div>
@@ -2155,9 +2055,7 @@ onUnmounted(() => {
             <p>
               {{ reflectionEvent.date }} ·
               {{ reflectionEvent.startTime || "Anytime" }}
-              <span v-if="reflectionEvent.endTime"
-                >–{{ reflectionEvent.endTime }}</span
-              >
+              <span v-if="reflectionEvent.endTime">–{{ reflectionEvent.endTime }}</span>
             </p>
           </div>
 
@@ -2166,12 +2064,7 @@ onUnmounted(() => {
 
         <div class="reflection-context">
           <strong>Original plan / 原计划</strong>
-          <p>
-            {{
-              reflectionEvent.notes ||
-              "No preparation notes were written for this event."
-            }}
-          </p>
+          <p>{{ reflectionEvent.notes || "No preparation notes were written for this event." }}</p>
         </div>
 
         <div class="reflection-form-grid">
@@ -3142,6 +3035,7 @@ textarea:focus {
   margin-top: 16px;
 }
 
+
 .collapse-btn {
   display: inline-flex;
   align-items: center;
@@ -3170,11 +3064,7 @@ textarea:focus {
   border: 1px solid #dbeafe;
   border-radius: 26px;
   background:
-    radial-gradient(
-      circle at top right,
-      rgba(37, 99, 235, 0.08),
-      transparent 34%
-    ),
+    radial-gradient(circle at top right, rgba(37, 99, 235, 0.08), transparent 34%),
     white;
   box-shadow: 0 18px 40px rgba(15, 23, 42, 0.06);
 }
@@ -3234,10 +3124,7 @@ textarea:focus {
   border: 1px solid #e2e8f0;
   border-radius: 21px;
   background: #f8fafc;
-  transition:
-    transform 0.2s ease,
-    border-color 0.2s ease,
-    box-shadow 0.2s ease;
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .reflection-card:hover {
