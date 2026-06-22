@@ -7,10 +7,37 @@ import {
   ref,
   watch,
 } from "vue";
+import app, { db } from "../firebase/firebase";
+import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
+import {
+  getDownloadURL,
+  getStorage,
+  ref as storageRef,
+  uploadBytes,
+} from "firebase/storage";
 
-const STORAGE_KEY = "growthos-study-workspace-v2";
+const STORAGE_KEY = "growthos-study-workspace-v3";
 const LEGACY_STORAGE_KEY = "growthos-study-notes";
+const PREVIOUS_STORAGE_KEY = "growthos-study-workspace-v2";
 const AI_ENDPOINT = import.meta.env.VITE_STUDY_AI_ENDPOINT || "";
+
+// Firebase is enabled by default because this project already has src/firebase/firebase.js.
+// Set VITE_STUDY_FIREBASE_SYNC=false only when you want local-only testing.
+const FIREBASE_SYNC_ENABLED =
+  import.meta.env.VITE_STUDY_FIREBASE_SYNC !== "false";
+const FIREBASE_COLLECTION =
+  import.meta.env.VITE_STUDY_FIREBASE_COLLECTION || "studyWorkspaces";
+const FIREBASE_DOC_ID =
+  import.meta.env.VITE_STUDY_FIREBASE_DOC_ID || "joy-main";
+const FIREBASE_IMAGE_FOLDER =
+  import.meta.env.VITE_STUDY_FIREBASE_IMAGE_FOLDER || "studyHubImages";
+
+let firebaseStorage = null;
+try {
+  firebaseStorage = getStorage(app);
+} catch (error) {
+  console.warn("Firebase Storage is not available yet:", error);
+}
 
 const workspaceTitle = ref("Study Hub");
 const nodes = ref([]);
@@ -24,6 +51,12 @@ const rightPanelOpen = ref(true);
 const sidebarCollapsed = ref(false);
 const editorRef = ref(null);
 const imageInputRef = ref(null);
+const imageInsertMode = ref("cursor");
+const imageBusy = ref(false);
+const selectedImageActive = ref(false);
+const textColor = ref("#37352f");
+const highlightColor = ref("#fff3a3");
+const editorBlock = ref("P");
 const hydrated = ref(false);
 const savedState = ref("Saved");
 const toast = ref("");
@@ -37,9 +70,15 @@ const statusOptions = ["Inbox", "Learning", "Review", "Completed"];
 
 let saveTimer = null;
 let toastTimer = null;
+let remoteSaveTimer = null;
+let selectedImageElement = null;
+let savedEditorRange = null;
+let firebaseDocRef = null;
 
-const currentNode = computed(() =>
-  nodes.value.find((node) => node.id === selectedId.value) || null,
+const syncState = ref("Local backup");
+
+const currentNode = computed(
+  () => nodes.value.find((node) => node.id === selectedId.value) || null,
 );
 
 const currentFolderId = computed(() => {
@@ -160,6 +199,7 @@ const folderNoteCount = computed(() => {
 
 onMounted(() => {
   loadWorkspace();
+  initFirebaseSync();
   document.addEventListener("click", closeMenus);
   window.addEventListener("keydown", handleKeyboardShortcut);
 });
@@ -169,10 +209,11 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleKeyboardShortcut);
   window.clearTimeout(saveTimer);
   window.clearTimeout(toastTimer);
+  window.clearTimeout(remoteSaveTimer);
 });
 
 watch(
-  [workspaceTitle, nodes, selectedId, sidebarCollapsed],
+  [workspaceTitle, nodes, selectedId, sidebarCollapsed, rightPanelOpen],
   () => {
     if (!hydrated.value) return;
 
@@ -190,12 +231,15 @@ watch(selectedId, () => {
   assistantQuestion.value = "";
   assistantResponse.value = "";
   openMenuId.value = null;
+  clearSelectedImage(false);
   nextTick(syncEditorContent);
 });
 
 function newId() {
-  return globalThis.crypto?.randomUUID?.() ||
-    `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return (
+    globalThis.crypto?.randomUUID?.() ||
+    `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  );
 }
 
 function createBaseNode(type, parentId, title) {
@@ -220,7 +264,9 @@ function createBaseNode(type, parentId, title) {
 
 function loadWorkspace() {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY);
+    const stored =
+      localStorage.getItem(STORAGE_KEY) ||
+      localStorage.getItem(PREVIOUS_STORAGE_KEY);
 
     if (stored) {
       const parsed = JSON.parse(stored);
@@ -234,6 +280,7 @@ function loadWorkspace() {
         ? parsed.selectedId
         : null;
       sidebarCollapsed.value = Boolean(parsed.sidebarCollapsed);
+      rightPanelOpen.value = parsed.rightPanelOpen !== false;
     } else {
       migrateLegacyNotes();
     }
@@ -291,22 +338,93 @@ function migrateLegacyNotes() {
   }
 }
 
+function buildWorkspacePayload() {
+  return {
+    version: 3,
+    workspaceTitle: workspaceTitle.value,
+    nodes: nodes.value,
+    selectedId: selectedId.value,
+    sidebarCollapsed: sidebarCollapsed.value,
+    rightPanelOpen: rightPanelOpen.value,
+    savedAt: new Date().toISOString(),
+  };
+}
+
+function saveLocalPayload(payload) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+}
+
 function persistWorkspace() {
+  const payload = buildWorkspacePayload();
+
   try {
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({
-        version: 2,
-        workspaceTitle: workspaceTitle.value,
-        nodes: nodes.value,
-        selectedId: selectedId.value,
-        sidebarCollapsed: sidebarCollapsed.value,
-      }),
-    );
+    saveLocalPayload(payload);
+    queueFirebaseSave(payload);
   } catch (error) {
     console.error("Failed to save Study Hub:", error);
     savedState.value = "Save failed";
   }
+}
+
+async function initFirebaseSync() {
+  if (!FIREBASE_SYNC_ENABLED) {
+    syncState.value = "Saved locally";
+    return;
+  }
+
+  try {
+    syncState.value = "Connecting Firebase…";
+    firebaseDocRef = doc(db, FIREBASE_COLLECTION, FIREBASE_DOC_ID);
+
+    const snapshot = await getDoc(firebaseDocRef);
+
+    if (snapshot.exists()) {
+      const data = snapshot.data();
+      if (Array.isArray(data.nodes)) {
+        workspaceTitle.value = data.workspaceTitle || "Study Hub";
+        nodes.value = data.nodes.map(normaliseNode);
+        selectedId.value = nodes.value.some(
+          (node) => node.id === data.selectedId,
+        )
+          ? data.selectedId
+          : null;
+        sidebarCollapsed.value = Boolean(data.sidebarCollapsed);
+        rightPanelOpen.value = data.rightPanelOpen !== false;
+        saveLocalPayload(buildWorkspacePayload());
+        nextTick(syncEditorContent);
+      }
+    }
+
+    syncState.value = "Firebase connected";
+  } catch (error) {
+    console.error("Firebase sync is not available:", error);
+    syncState.value = "Saved locally";
+    showToast("Firebase is not connected. Saved locally for now.");
+  }
+}
+
+function queueFirebaseSave(payload) {
+  if (!FIREBASE_SYNC_ENABLED || !firebaseDocRef) return;
+
+  window.clearTimeout(remoteSaveTimer);
+  remoteSaveTimer = window.setTimeout(async () => {
+    try {
+      syncState.value = "Syncing Firebase…";
+      await setDoc(
+        firebaseDocRef,
+        {
+          ...payload,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+      syncState.value = "Synced to Firebase";
+    } catch (error) {
+      console.error("Failed to sync Study Hub to Firebase:", error);
+      syncState.value = "Local backup only";
+      showToast("Firebase save failed. Local backup is still saved.");
+    }
+  }, 650);
 }
 
 function sortNodes(items) {
@@ -394,14 +512,66 @@ function updateContent(event) {
 }
 
 function updateRichContent() {
-  if (!currentNode.value || currentNode.value.type !== "note" || !editorRef.value) return;
+  if (
+    !currentNode.value ||
+    currentNode.value.type !== "note" ||
+    !editorRef.value
+  )
+    return;
+
+  saveEditorSelection();
   currentNode.value.content = cleanEditorHtml(editorRef.value.innerHTML);
   touchNode(currentNode.value);
 }
 
 function syncEditorContent() {
-  if (!editorRef.value || !currentNode.value || currentNode.value.type !== "note") return;
+  if (
+    !editorRef.value ||
+    !currentNode.value ||
+    currentNode.value.type !== "note"
+  )
+    return;
   editorRef.value.innerHTML = currentNode.value.content || "";
+  normaliseEditorImageBlocks(editorRef.value);
+  selectedImageActive.value = false;
+  selectedImageElement = null;
+}
+
+function saveEditorSelection() {
+  if (!editorRef.value) return;
+
+  const selection = window.getSelection();
+  if (!selection?.rangeCount) return;
+
+  const range = selection.getRangeAt(0);
+  const container = range.commonAncestorContainer;
+
+  if (editorRef.value.contains(container)) {
+    savedEditorRange = range.cloneRange();
+  }
+}
+
+function restoreEditorSelection() {
+  if (!editorRef.value) return;
+
+  editorRef.value.focus();
+
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+
+  if (savedEditorRange) {
+    try {
+      selection?.addRange(savedEditorRange);
+      return;
+    } catch (error) {
+      savedEditorRange = null;
+    }
+  }
+
+  const range = document.createRange();
+  range.selectNodeContents(editorRef.value);
+  range.collapse(false);
+  selection?.addRange(range);
 }
 
 function stripHtmlText(html = "") {
@@ -418,9 +588,7 @@ function stripHtmlText(html = "") {
 
   const div = document.createElement("div");
   div.innerHTML = String(html).replace(/<img[^>]*>/gi, " image ");
-  return (div.innerText || div.textContent || "")
-    .replace(/\s+/g, " ")
-    .trim();
+  return (div.innerText || div.textContent || "").replace(/\s+/g, " ").trim();
 }
 
 function cleanEditorHtml(html = "") {
@@ -439,30 +607,128 @@ function cleanEditorHtml(html = "") {
         element.removeAttribute(attribute.name);
       }
     });
+
+    element.classList?.remove("is-selected");
+    element.removeAttribute?.("data-selected");
   });
+
+  normaliseEditorImageBlocks(template.content);
 
   return template.innerHTML;
 }
 
-function openImagePicker() {
-  imageInputRef.value?.click();
+function isEditableTextBlock(node) {
+  return (
+    node?.nodeType === Node.ELEMENT_NODE &&
+    ["P", "DIV", "H1", "H2", "H3", "BLOCKQUOTE", "UL", "OL"].includes(
+      node.tagName,
+    )
+  );
+}
+
+function createSpacerParagraph(className = "image-spacer") {
+  const paragraph = document.createElement("p");
+  paragraph.className = className;
+  paragraph.appendChild(document.createElement("br"));
+  return paragraph;
+}
+
+function normaliseEditorImageBlocks(root) {
+  if (!root || typeof document === "undefined") return;
+
+  root.querySelectorAll("img").forEach((image) => {
+    image.classList.add("note-image");
+    image.removeAttribute("width");
+    image.removeAttribute("height");
+    image.draggable = false;
+
+    let figure = image.closest("figure.image-block");
+    if (!figure) {
+      figure = document.createElement("figure");
+      figure.className = "image-block";
+      image.replaceWith(figure);
+      figure.appendChild(image);
+    }
+
+    figure.setAttribute("contenteditable", "false");
+    figure.classList.add("image-block");
+  });
+
+  root.querySelectorAll("figure.image-block").forEach((figure) => {
+    figure.setAttribute("contenteditable", "false");
+
+    if (!isEditableTextBlock(figure.previousElementSibling)) {
+      figure.before(createSpacerParagraph("image-spacer image-spacer-before"));
+    }
+
+    if (!isEditableTextBlock(figure.nextElementSibling)) {
+      figure.after(createSpacerParagraph("image-spacer image-spacer-after"));
+    }
+  });
+}
+
+function getImageInsertMode(mode) {
+  return ["cursor", "before", "after"].includes(mode) ? mode : "cursor";
+}
+
+function openImagePicker(mode = "cursor") {
+  if (!currentNode.value || currentNode.value.type !== "note") {
+    showToast("Open a note before adding an image");
+    return;
+  }
+
+  imageInsertMode.value = getImageInsertMode(mode);
+  saveEditorSelection();
+
+  const input = imageInputRef.value;
+  if (!input) {
+    showToast("Image picker is not ready yet");
+    return;
+  }
+
+  input.value = "";
+  input.click();
 }
 
 async function handleImagePick(event) {
-  const files = Array.from(event.target.files || []).filter((file) =>
+  const input = event.target;
+  const files = Array.from(input.files || []).filter((file) =>
     file.type.startsWith("image/"),
   );
 
-  if (!files.length) return;
-
-  for (const file of files) {
-    const dataUrl = await fileToDataUrl(file);
-    insertImageAtCursor(dataUrl, file.name || "Inserted image");
+  if (!files.length) {
+    imageInsertMode.value = "cursor";
+    input.value = "";
+    return;
   }
 
-  event.target.value = "";
-  updateRichContent();
-  showToast(files.length === 1 ? "Image added" : `${files.length} images added`);
+  imageBusy.value = true;
+  const insertMode = getImageInsertMode(imageInsertMode.value);
+  let insertedCount = 0;
+
+  try {
+    for (const file of files) {
+      const imageUrl = await resolveImageSource(file);
+      insertImageAtCursor(imageUrl, file.name || "Inserted image", insertMode);
+      insertedCount += 1;
+    }
+
+    if (insertedCount) {
+      updateRichContent();
+      showToast(
+        insertedCount === 1
+          ? "Image added"
+          : `${insertedCount} images added`,
+      );
+    }
+  } catch (error) {
+    console.error("Failed to insert image:", error);
+    showToast("Image could not be inserted");
+  } finally {
+    imageBusy.value = false;
+    imageInsertMode.value = "cursor";
+    input.value = "";
+  }
 }
 
 async function handleEditorPaste(event) {
@@ -477,12 +743,16 @@ async function handleEditorPaste(event) {
     const file = item.getAsFile();
     if (!file) continue;
 
-    const dataUrl = await fileToDataUrl(file);
-    insertImageAtCursor(dataUrl, file.name || "Pasted image");
+    const imageUrl = await resolveImageSource(file);
+    insertImageAtCursor(imageUrl, file.name || "Pasted image", "cursor");
   }
 
   updateRichContent();
-  showToast(imageItems.length === 1 ? "Image pasted" : `${imageItems.length} images pasted`);
+  showToast(
+    imageItems.length === 1
+      ? "Image pasted"
+      : `${imageItems.length} images pasted`,
+  );
 }
 
 async function handleEditorDrop(event) {
@@ -492,13 +762,20 @@ async function handleEditorDrop(event) {
 
   if (!files.length) return;
 
+  event.preventDefault();
+  placeCaretFromPoint(event.clientX, event.clientY);
+
+  let insertedCount = 0;
   for (const file of files) {
-    const dataUrl = await fileToDataUrl(file);
-    insertImageAtCursor(dataUrl, file.name || "Dropped image");
+    const imageUrl = await resolveImageSource(file);
+    insertImageAtCursor(imageUrl, file.name || "Dropped image", "cursor");
+    insertedCount += 1;
   }
 
   updateRichContent();
-  showToast(files.length === 1 ? "Image added" : `${files.length} images added`);
+  showToast(
+    insertedCount === 1 ? "Image added" : `${insertedCount} images added`,
+  );
 }
 
 function fileToDataUrl(file) {
@@ -510,10 +787,92 @@ function fileToDataUrl(file) {
   });
 }
 
-function insertImageAtCursor(src, alt = "Study image") {
+function safeStorageName(name = "image") {
+  return String(name)
+    .replace(/[^a-zA-Z0-9._-]/g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 80);
+}
+
+async function resolveImageSource(file) {
+  if (FIREBASE_SYNC_ENABLED && firebaseStorage) {
+    try {
+      syncState.value = "Uploading image…";
+      const extension = file.name?.split(".").pop() || "png";
+      const imagePath = `${FIREBASE_IMAGE_FOLDER}/${FIREBASE_DOC_ID}/${Date.now()}-${newId()}-${safeStorageName(file.name || `image.${extension}`)}`;
+      const imageRef = storageRef(firebaseStorage, imagePath);
+
+      await uploadBytes(imageRef, file, {
+        contentType: file.type || "image/png",
+      });
+
+      const url = await getDownloadURL(imageRef);
+      syncState.value = "Image uploaded";
+      return url;
+    } catch (error) {
+      console.error("Failed to upload image to Firebase Storage:", error);
+      syncState.value = "Local image backup";
+      showToast("Image upload failed. Using local image backup.");
+    }
+  }
+
+  return fileToDataUrl(file);
+}
+
+function createImageFigure(src, alt = "Study image") {
+  const figure = document.createElement("figure");
+  figure.className = "image-block";
+  figure.setAttribute("contenteditable", "false");
+
+  const image = document.createElement("img");
+  image.src = src;
+  image.alt = alt;
+  image.className = "note-image image-full";
+  image.draggable = false;
+
+  figure.appendChild(image);
+  return figure;
+}
+
+function insertImageAtCursor(src, alt = "Study image", mode = "cursor") {
   if (!editorRef.value) return;
 
-  editorRef.value.focus();
+  mode = getImageInsertMode(mode);
+
+  if (selectedImageElement && mode === "cursor") {
+    mode = "after";
+  }
+
+  const figure = createImageFigure(src, alt);
+  const beforeParagraph = createSpacerParagraph(
+    "image-spacer image-spacer-before",
+  );
+  const afterParagraph = createSpacerParagraph(
+    "image-spacer image-spacer-after",
+  );
+
+  const fragment = document.createDocumentFragment();
+  fragment.appendChild(beforeParagraph);
+  fragment.appendChild(figure);
+  fragment.appendChild(afterParagraph);
+
+  if (selectedImageElement && (mode === "before" || mode === "after")) {
+    const selectedFigure = selectedImageElement.closest("figure.image-block");
+    if (selectedFigure) {
+      if (mode === "before") {
+        selectedFigure.before(fragment);
+        focusParagraph(beforeParagraph);
+      } else {
+        selectedFigure.after(fragment);
+        focusParagraph(afterParagraph);
+      }
+      savedEditorRange = null;
+      clearSelectedImage(false);
+      return;
+    }
+  }
+
+  restoreEditorSelection();
 
   const selection = window.getSelection();
   let range = selection?.rangeCount ? selection.getRangeAt(0) : null;
@@ -524,25 +883,260 @@ function insertImageAtCursor(src, alt = "Study image") {
     range.collapse(false);
   }
 
-  const image = document.createElement("img");
-  image.src = src;
-  image.alt = alt;
-  image.className = "note-image";
-
-  const paragraph = document.createElement("p");
-  paragraph.appendChild(document.createElement("br"));
-
-  const fragment = document.createDocumentFragment();
-  fragment.appendChild(image);
-  fragment.appendChild(paragraph);
-
   range.deleteContents();
   range.insertNode(fragment);
+  focusParagraph(afterParagraph);
+  savedEditorRange = window.getSelection()?.rangeCount
+    ? window.getSelection().getRangeAt(0).cloneRange()
+    : null;
+}
 
-  range.setStartAfter(paragraph);
-  range.collapse(true);
+function placeCaretFromPoint(x, y) {
+  if (!editorRef.value) return;
+
+  let range = null;
+
+  if (document.caretRangeFromPoint) {
+    range = document.caretRangeFromPoint(x, y);
+  } else if (document.caretPositionFromPoint) {
+    const position = document.caretPositionFromPoint(x, y);
+    if (position) {
+      range = document.createRange();
+      range.setStart(position.offsetNode, position.offset);
+      range.collapse(true);
+    }
+  }
+
+  if (range && editorRef.value.contains(range.commonAncestorContainer)) {
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    savedEditorRange = range.cloneRange();
+  }
+}
+
+function focusParagraph(paragraph) {
+  if (!paragraph) return;
+
+  editorRef.value?.focus();
+
+  const range = document.createRange();
+  range.selectNodeContents(paragraph);
+  range.collapse(false);
+
+  const selection = window.getSelection();
   selection.removeAllRanges();
   selection.addRange(range);
+  savedEditorRange = range.cloneRange();
+}
+
+function addTextAroundSelectedImage(position = "after") {
+  if (!selectedImageElement) return;
+
+  const figure = selectedImageElement.closest("figure.image-block");
+  if (!figure) return;
+
+  const paragraph = createSpacerParagraph(
+    position === "before"
+      ? "image-spacer image-spacer-before"
+      : "image-spacer image-spacer-after",
+  );
+
+  if (position === "before") {
+    figure.before(paragraph);
+  } else {
+    figure.after(paragraph);
+  }
+
+  clearSelectedImage(false);
+  focusParagraph(paragraph);
+  updateRichContent();
+}
+
+function focusEditor() {
+  editorRef.value?.focus();
+  restoreEditorSelection();
+}
+
+function runFormat(command, value = null) {
+  if (!currentNode.value || currentNode.value.type !== "note") return;
+
+  clearSelectedImage(false);
+  restoreEditorSelection();
+  document.execCommand("styleWithCSS", false, true);
+  document.execCommand(command, false, value);
+  saveEditorSelection();
+  updateRichContent();
+}
+
+function applyBlock(tag) {
+  editorBlock.value = tag;
+  runFormat("formatBlock", tag);
+}
+
+function setTextColor(value) {
+  textColor.value = value;
+  runFormat("foreColor", value);
+}
+
+function setHighlightColor(value) {
+  highlightColor.value = value;
+  runFormat("hiliteColor", value);
+}
+
+function clearFormatting() {
+  runFormat("removeFormat");
+}
+
+function createEditorLink() {
+  const url = window.prompt("Paste the link URL");
+  if (!url) return;
+  runFormat("createLink", url.trim());
+}
+
+function insertEmoji(emoji) {
+  restoreEditorSelection();
+  document.execCommand("insertText", false, emoji);
+  saveEditorSelection();
+  updateRichContent();
+}
+
+function insertDivider() {
+  restoreEditorSelection();
+  document.execCommand("insertHTML", false, "<hr><p><br></p>");
+  saveEditorSelection();
+  updateRichContent();
+}
+
+function insertTabAtCursor() {
+  restoreEditorSelection();
+  document.execCommand(
+    "insertHTML",
+    false,
+    '<span class="tab-space">&nbsp;&nbsp;&nbsp;&nbsp;</span>',
+  );
+  saveEditorSelection();
+  updateRichContent();
+}
+
+function handleEditorKeydown(event) {
+  if (event.key === "Tab") {
+    event.preventDefault();
+    insertTabAtCursor();
+    return;
+  }
+
+  if (selectedImageElement && event.key === "Enter") {
+    event.preventDefault();
+    addTextAroundSelectedImage("after");
+    return;
+  }
+
+  if (
+    (event.key === "Backspace" || event.key === "Delete") &&
+    selectedImageElement
+  ) {
+    event.preventDefault();
+    removeSelectedImage();
+    return;
+  }
+
+  const modifier = event.metaKey || event.ctrlKey;
+  if (!modifier) return;
+
+  const key = event.key.toLowerCase();
+  const shortcutMap = {
+    b: "bold",
+    i: "italic",
+    u: "underline",
+  };
+
+  if (shortcutMap[key]) {
+    event.preventDefault();
+    runFormat(shortcutMap[key]);
+  }
+}
+
+function handleEditorClick(event) {
+  const image = event.target?.closest?.("img.note-image, .rich-editor img");
+
+  if (image && editorRef.value?.contains(image)) {
+    selectEditorImage(image);
+    return;
+  }
+
+  clearSelectedImage(false);
+  saveEditorSelection();
+}
+
+function selectEditorImage(image) {
+  clearSelectedImage(false);
+  selectedImageElement = image;
+  selectedImageElement.classList.add("is-selected");
+  selectedImageActive.value = true;
+
+  const figure = selectedImageElement.closest("figure.image-block");
+  const after = figure?.nextElementSibling;
+  if (after && editorRef.value?.contains(after)) {
+    const range = document.createRange();
+    range.selectNodeContents(after);
+    range.collapse(false);
+    savedEditorRange = range.cloneRange();
+  }
+}
+
+function clearSelectedImage(save = true) {
+  if (selectedImageElement) {
+    selectedImageElement.classList.remove("is-selected");
+  }
+  selectedImageElement = null;
+  selectedImageActive.value = false;
+  if (save) updateRichContent();
+}
+
+function removeSelectedImage() {
+  if (!selectedImageElement) return;
+
+  const wrapper = selectedImageElement.closest("figure.image-block");
+  const nextEditable = createSpacerParagraph("image-spacer image-spacer-after");
+
+  if (wrapper) {
+    const previous = wrapper.previousElementSibling;
+    const next = wrapper.nextElementSibling;
+    wrapper.replaceWith(nextEditable);
+
+    if (
+      previous?.classList?.contains("image-spacer") &&
+      !previous.textContent.trim()
+    ) {
+      previous.remove();
+    }
+
+    if (next?.classList?.contains("image-spacer") && !next.textContent.trim()) {
+      next.remove();
+    }
+  } else {
+    selectedImageElement.replaceWith(nextEditable);
+  }
+
+  selectedImageElement = null;
+  selectedImageActive.value = false;
+  focusParagraph(nextEditable);
+
+  updateRichContent();
+  showToast("Image removed");
+}
+
+function resizeSelectedImage(size) {
+  if (!selectedImageElement) return;
+
+  selectedImageElement.classList.remove(
+    "image-small",
+    "image-medium",
+    "image-full",
+  );
+  selectedImageElement.classList.add(size);
+  updateRichContent();
 }
 
 function updateField(field, value) {
@@ -601,7 +1195,9 @@ function duplicateNote(id) {
 
 function collectDescendantIds(parentId) {
   const result = [];
-  const directChildren = nodes.value.filter((node) => node.parentId === parentId);
+  const directChildren = nodes.value.filter(
+    (node) => node.parentId === parentId,
+  );
 
   directChildren.forEach((child) => {
     result.push(child.id);
@@ -861,10 +1457,14 @@ function buildLocalReview() {
     suggestions.push("Write one question you still cannot answer confidently.");
   }
   if (lines.length < 3) {
-    suggestions.push("Break the note into short sections so it is easier to review.");
+    suggestions.push(
+      "Break the note into short sections so it is easier to review.",
+    );
   }
   if (!suggestions.length) {
-    suggestions.push("Turn this note into three recall questions for your next review.");
+    suggestions.push(
+      "Turn this note into three recall questions for your next review.",
+    );
   }
 
   return `Quick review\n\n${suggestions.map((item, index) => `${index + 1}. ${item}`).join("\n")}\n\nConnect VITE_STUDY_AI_ENDPOINT when you are ready to use your own AI service.`;
@@ -872,8 +1472,37 @@ function buildLocalReview() {
 </script>
 
 <template>
-  <section class="study-shell" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
-    <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }" @dragover.prevent @drop="dropAtRoot">
+  <section
+    class="study-shell"
+    :class="{
+      'sidebar-collapsed': sidebarCollapsed,
+      'inspector-closed': !rightPanelOpen,
+    }"
+  >
+    <button
+      class="edge-toggle sidebar-edge-toggle"
+      type="button"
+      :title="sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'"
+      @click="sidebarCollapsed = !sidebarCollapsed"
+    >
+      {{ sidebarCollapsed ? "›" : "‹" }}
+    </button>
+
+    <button
+      class="edge-toggle inspector-edge-toggle"
+      type="button"
+      :title="rightPanelOpen ? 'Hide details' : 'Show details'"
+      @click="rightPanelOpen = !rightPanelOpen"
+    >
+      {{ rightPanelOpen ? "›" : "‹" }}
+    </button>
+
+    <aside
+      class="sidebar"
+      :class="{ collapsed: sidebarCollapsed }"
+      @dragover.prevent
+      @drop="dropAtRoot"
+    >
       <div class="workspace-head">
         <button
           class="workspace-mark mark-button"
@@ -889,6 +1518,14 @@ function buildLocalReview() {
           aria-label="Workspace name"
         />
         <button
+          class="mini-panel-button"
+          type="button"
+          :title="sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'"
+          @click.stop="sidebarCollapsed = !sidebarCollapsed"
+        >
+          {{ sidebarCollapsed ? "›" : "‹" }}
+        </button>
+        <button
           class="icon-button"
           type="button"
           title="New note"
@@ -900,9 +1537,7 @@ function buildLocalReview() {
 
       <div class="search-wrap">
         <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path
-            d="m21 21-4.35-4.35m2.35-5.65a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z"
-          />
+          <path d="m21 21-4.35-4.35m2.35-5.65a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z" />
         </svg>
         <input v-model="searchQuery" placeholder="Search" />
         <button
@@ -932,7 +1567,9 @@ function buildLocalReview() {
       </div>
 
       <div class="tree-label">
-        <span>{{ searchQuery ? `${searchResultCount} results` : "Library" }}</span>
+        <span>{{
+          searchQuery ? `${searchResultCount} results` : "Library"
+        }}</span>
         <span class="shortcut">⌘ N</span>
       </div>
 
@@ -977,7 +1614,9 @@ function buildLocalReview() {
               v-if="entry.node.type === 'folder'"
               class="collapse-button"
               type="button"
-              :aria-label="entry.node.collapsed ? 'Expand folder' : 'Collapse folder'"
+              :aria-label="
+                entry.node.collapsed ? 'Expand folder' : 'Collapse folder'
+              "
               @click.stop="toggleCollapse(entry.node.id)"
             >
               {{ entry.node.collapsed && !searchQuery ? "›" : "⌄" }}
@@ -1084,15 +1723,19 @@ function buildLocalReview() {
       </nav>
 
       <div class="sidebar-footer">
-        <span>{{ allNotes.length }} notes · {{ allFolders.length }} folders</span>
-        <span>{{ savedState }}</span>
+        <span
+          >{{ allNotes.length }} notes · {{ allFolders.length }} folders</span
+        >
+        <span>{{ syncState }}</span>
       </div>
     </aside>
 
     <main class="main-area">
       <header class="topbar">
         <div class="breadcrumbs">
-          <button type="button" @click="selectRoot">{{ workspaceTitle }}</button>
+          <button type="button" @click="selectRoot">
+            {{ workspaceTitle }}
+          </button>
           <template v-for="crumb in breadcrumbs" :key="crumb.id">
             <span>/</span>
             <button type="button" @click="selectNode(crumb.id)">
@@ -1125,14 +1768,23 @@ function buildLocalReview() {
           <div class="page-kicker">PERSONAL KNOWLEDGE BASE</div>
           <h1>{{ workspaceTitle }}</h1>
           <p class="page-description">
-            Keep courses, resources, questions and project notes in one quiet place.
+            Keep courses, resources, questions and project notes in one quiet
+            place.
           </p>
 
           <div class="page-actions">
-            <button class="primary-action" type="button" @click="createNote(null)">
+            <button
+              class="primary-action"
+              type="button"
+              @click="createNote(null)"
+            >
               New note
             </button>
-            <button class="secondary-action" type="button" @click="createFolder(null)">
+            <button
+              class="secondary-action"
+              type="button"
+              @click="createFolder(null)"
+            >
               New folder
             </button>
           </div>
@@ -1148,7 +1800,9 @@ function buildLocalReview() {
               <path d="M3 6h7l2 2h9v11H3V6Z" />
             </svg>
             <h2>Start with a folder or note</h2>
-            <p>You can drag items into folders and create folders inside folders.</p>
+            <p>
+              You can drag items into folders and create folders inside folders.
+            </p>
           </div>
 
           <template v-else>
@@ -1173,17 +1827,16 @@ function buildLocalReview() {
                 </svg>
                 <span>{{ node.title || "Untitled" }}</span>
               </span>
-              <span>{{ node.type === "folder" ? "Folder" : node.noteType }}</span>
+              <span>{{
+                node.type === "folder" ? "Folder" : node.noteType
+              }}</span>
               <span>{{ relativeDate(node.updatedAt) }}</span>
             </button>
           </template>
         </div>
       </section>
 
-      <section
-        v-else-if="currentNode.type === 'folder'"
-        class="folder-page"
-      >
+      <section v-else-if="currentNode.type === 'folder'" class="folder-page">
         <div class="page-width">
           <svg class="page-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M3 6h7l2 2h9v11H3V6Z" />
@@ -1252,7 +1905,9 @@ function buildLocalReview() {
                 </svg>
                 <span>{{ node.title || "Untitled" }}</span>
               </span>
-              <span>{{ node.type === "folder" ? "Folder" : node.noteType }}</span>
+              <span>{{
+                node.type === "folder" ? "Folder" : node.noteType
+              }}</span>
               <span>{{ relativeDate(node.updatedAt) }}</span>
             </button>
           </template>
@@ -1278,7 +1933,9 @@ function buildLocalReview() {
               class="favourite-button"
               :class="{ active: currentNode.favorite }"
               type="button"
-              :title="currentNode.favorite ? 'Remove favourite' : 'Add favourite'"
+              :title="
+                currentNode.favorite ? 'Remove favourite' : 'Add favourite'
+              "
               @click="toggleFavorite(currentNode.id)"
             >
               ☆
@@ -1290,7 +1947,9 @@ function buildLocalReview() {
           </div>
 
           <div class="editor-toolbar">
-            <button type="button" @click="openImagePicker">Add image</button>
+            <button type="button" :disabled="imageBusy" @click="openImagePicker('cursor')">
+              {{ imageBusy ? "Adding image…" : "Add image" }}
+            </button>
             <span>Paste screenshots or images directly into the note.</span>
             <input
               ref="imageInputRef"
@@ -1298,7 +1957,7 @@ function buildLocalReview() {
               type="file"
               accept="image/*"
               multiple
-              @change="handleImagePick"
+              @change.stop="handleImagePick"
             />
           </div>
 
@@ -1313,6 +1972,10 @@ function buildLocalReview() {
             data-placeholder="Start writing…"
             @input="updateRichContent"
             @paste="handleEditorPaste"
+            @keydown="handleEditorKeydown"
+            @mouseup="saveEditorSelection"
+            @keyup="saveEditorSelection"
+            @click="handleEditorClick"
             @dragover.prevent
             @drop.prevent="handleEditorDrop"
           ></div>
@@ -1320,7 +1983,7 @@ function buildLocalReview() {
           <footer class="editor-footer">
             <span>{{ currentWordCount }} words</span>
             <span>{{ currentCharacterCount }} characters</span>
-            <span>Saved locally</span>
+            <span>{{ syncState }}</span>
           </footer>
         </div>
       </section>
@@ -1350,7 +2013,9 @@ function buildLocalReview() {
         <div class="inspector-section">
           <h3>Shortcuts</h3>
           <p><kbd>⌘ / Ctrl</kbd> + <kbd>N</kbd> New note</p>
-          <p><kbd>⌘ / Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>N</kbd> New folder</p>
+          <p>
+            <kbd>⌘ / Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>N</kbd> New folder
+          </p>
           <p><kbd>⌘ / Ctrl</kbd> + <kbd>S</kbd> Save now</p>
         </div>
       </template>
@@ -1394,7 +2059,11 @@ function buildLocalReview() {
           >
             Move to top level
           </button>
-          <button class="danger-text" type="button" @click="deleteNode(currentNode.id)">
+          <button
+            class="danger-text"
+            type="button"
+            @click="deleteNode(currentNode.id)"
+          >
             Delete folder
           </button>
         </div>
@@ -1402,10 +2071,244 @@ function buildLocalReview() {
 
       <template v-else>
         <div class="inspector-head">
-          <h2>Details</h2>
+          <div class="inspector-title-group">
+            <h2>Details</h2>
+            <button
+              class="small-panel-toggle"
+              type="button"
+              title="Hide details"
+              @click="rightPanelOpen = false"
+            >
+              ›
+            </button>
+          </div>
           <button type="button" @click="beginRename(currentNode.id)">
             Rename
           </button>
+        </div>
+
+        <div class="format-panel">
+          <div class="format-panel-title">Writing tools</div>
+
+          <select
+            class="format-select"
+            :value="editorBlock"
+            @mousedown="saveEditorSelection"
+            @change="applyBlock($event.target.value)"
+          >
+            <option value="P">Normal text</option>
+            <option value="H1">Heading 1</option>
+            <option value="H2">Heading 2</option>
+            <option value="H3">Heading 3</option>
+            <option value="BLOCKQUOTE">Quote</option>
+          </select>
+
+          <div class="format-grid">
+            <button
+              type="button"
+              title="Bold"
+              @mousedown.prevent
+              @click="runFormat('bold')"
+            >
+              <strong>B</strong>
+            </button>
+            <button
+              type="button"
+              title="Italic"
+              @mousedown.prevent
+              @click="runFormat('italic')"
+            >
+              <em>I</em>
+            </button>
+            <button
+              type="button"
+              title="Underline"
+              @mousedown.prevent
+              @click="runFormat('underline')"
+            >
+              <u>U</u>
+            </button>
+            <button
+              type="button"
+              title="Strike"
+              @mousedown.prevent
+              @click="runFormat('strikeThrough')"
+            >
+              <s>S</s>
+            </button>
+            <button
+              type="button"
+              title="Bullet list"
+              @mousedown.prevent
+              @click="runFormat('insertUnorderedList')"
+            >
+              • List
+            </button>
+            <button
+              type="button"
+              title="Numbered list"
+              @mousedown.prevent
+              @click="runFormat('insertOrderedList')"
+            >
+              1. List
+            </button>
+            <button
+              type="button"
+              title="Align left"
+              @mousedown.prevent
+              @click="runFormat('justifyLeft')"
+            >
+              ⇤
+            </button>
+            <button
+              type="button"
+              title="Align center"
+              @mousedown.prevent
+              @click="runFormat('justifyCenter')"
+            >
+              ↔
+            </button>
+            <button
+              type="button"
+              title="Align right"
+              @mousedown.prevent
+              @click="runFormat('justifyRight')"
+            >
+              ⇥
+            </button>
+            <button
+              type="button"
+              title="Link"
+              @mousedown.prevent
+              @click="createEditorLink"
+            >
+              Link
+            </button>
+            <button
+              type="button"
+              title="Divider"
+              @mousedown.prevent
+              @click="insertDivider"
+            >
+              Line
+            </button>
+            <button
+              type="button"
+              title="Clear format"
+              @mousedown.prevent
+              @click="clearFormatting"
+            >
+              Clear
+            </button>
+          </div>
+
+          <div class="color-tools">
+            <label>
+              <span>Text</span>
+              <input
+                v-model="textColor"
+                type="color"
+                @mousedown="saveEditorSelection"
+                @input="setTextColor($event.target.value)"
+              />
+            </label>
+            <label>
+              <span>Highlight</span>
+              <input
+                v-model="highlightColor"
+                type="color"
+                @mousedown="saveEditorSelection"
+                @input="setHighlightColor($event.target.value)"
+              />
+            </label>
+          </div>
+
+          <div class="emoji-row">
+            <button
+              v-for="emoji in ['✨', '⭐', '✅', '📌', '🔥', '💡', '📚', '🧠']"
+              :key="emoji"
+              type="button"
+              @mousedown.prevent
+              @click="insertEmoji(emoji)"
+            >
+              {{ emoji }}
+            </button>
+          </div>
+
+          <button
+            class="wide-tool-button"
+            type="button"
+            :disabled="imageBusy"
+            @mousedown.prevent
+            @click="openImagePicker('cursor')"
+          >
+            {{ imageBusy ? "Adding image…" : "Insert image" }}
+          </button>
+
+          <div v-if="selectedImageActive" class="selected-image-tools">
+            <div class="format-panel-title">Selected image</div>
+            <div class="image-insert-tools">
+              <button
+                type="button"
+                @mousedown.prevent
+                @click="addTextAroundSelectedImage('before')"
+              >
+                Text above
+              </button>
+              <button
+                type="button"
+                @mousedown.prevent
+                @click="addTextAroundSelectedImage('after')"
+              >
+                Text below
+              </button>
+              <button
+                type="button"
+                @mousedown.prevent
+                @click="openImagePicker('before')"
+              >
+                Image above
+              </button>
+              <button
+                type="button"
+                @mousedown.prevent
+                @click="openImagePicker('after')"
+              >
+                Image below
+              </button>
+            </div>
+            <div class="format-grid compact-grid">
+              <button
+                type="button"
+                @mousedown.prevent
+                @click="resizeSelectedImage('image-small')"
+              >
+                Small
+              </button>
+              <button
+                type="button"
+                @mousedown.prevent
+                @click="resizeSelectedImage('image-medium')"
+              >
+                Medium
+              </button>
+              <button
+                type="button"
+                @mousedown.prevent
+                @click="resizeSelectedImage('image-full')"
+              >
+                Full
+              </button>
+              <button
+                class="danger-tool"
+                type="button"
+                @mousedown.prevent
+                @click="removeSelectedImage"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
         </div>
 
         <label class="property-field">
@@ -1426,7 +2329,11 @@ function buildLocalReview() {
             :value="currentNode.status"
             @change="updateField('status', $event.target.value)"
           >
-            <option v-for="status in statusOptions" :key="status" :value="status">
+            <option
+              v-for="status in statusOptions"
+              :key="status"
+              :value="status"
+            >
               {{ status }}
             </option>
           </select>
@@ -1552,21 +2459,67 @@ button {
   --sidebar-width: 270px;
   --inspector-width: 270px;
   display: grid;
-  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--inspector-width);
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(
+      --inspector-width
+    );
   width: 100%;
   height: calc(100vh - 32px);
   min-height: 680px;
+  position: relative;
   overflow: hidden;
   border: 1px solid #e8e8e5;
   border-radius: 12px;
   background: #ffffff;
   color: #37352f;
   font-family:
-    Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    Inter,
+    ui-sans-serif,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
 }
 
 .study-shell.sidebar-collapsed {
   --sidebar-width: 54px;
+}
+
+.study-shell.inspector-closed {
+  --inspector-width: 0px;
+}
+
+.edge-toggle {
+  position: absolute;
+  z-index: 70;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 1px solid #dededb;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #787774;
+  box-shadow: 0 4px 14px rgba(15, 15, 15, 0.08);
+  cursor: pointer;
+}
+
+.edge-toggle:hover {
+  background: #f7f7f5;
+  color: #37352f;
+}
+
+.sidebar-edge-toggle {
+  top: 16px;
+  left: calc(var(--sidebar-width) - 12px);
+}
+
+.inspector-edge-toggle {
+  top: 16px;
+  right: calc(var(--inspector-width) - 12px);
+}
+
+.study-shell.inspector-closed .inspector-edge-toggle {
+  right: 12px;
 }
 
 .sidebar,
@@ -1583,7 +2536,7 @@ button {
 
 .workspace-head {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) 28px;
+  grid-template-columns: 28px minmax(0, 1fr) 28px 28px;
   align-items: center;
   gap: 8px;
   padding: 12px 12px 8px;
@@ -1618,6 +2571,7 @@ button {
 
 .sidebar.collapsed .workspace-name,
 .sidebar.collapsed .workspace-head .icon-button,
+.sidebar.collapsed .workspace-head .mini-panel-button,
 .sidebar.collapsed .search-wrap,
 .sidebar.collapsed .quick-create,
 .sidebar.collapsed .tree-label,
@@ -1637,6 +2591,7 @@ button {
   font-weight: 650;
 }
 
+.mini-panel-button,
 .icon-button,
 .row-menu-button,
 .collapse-button,
@@ -1645,6 +2600,23 @@ button {
   border: 0;
   background: transparent;
   cursor: pointer;
+}
+
+.mini-panel-button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #787774;
+  cursor: pointer;
+}
+
+.mini-panel-button:hover {
+  background: #e9e9e7;
+  color: #37352f;
 }
 
 .icon-button {
@@ -2002,8 +2974,17 @@ button {
 
 .page-width,
 .note-width {
-  width: min(100%, 850px);
+  width: min(100%, 920px);
   margin: 0 auto;
+}
+
+.study-shell.sidebar-collapsed .note-width,
+.study-shell.inspector-closed .note-width {
+  width: min(100%, 1040px);
+}
+
+.study-shell.sidebar-collapsed.inspector-closed .note-width {
+  width: min(100%, 1140px);
 }
 
 .page-width {
@@ -2256,7 +3237,7 @@ button {
 
 .note-editor {
   width: 100%;
-  min-height: 420px;
+  min-height: 500px;
   flex: 1;
   margin-top: 28px;
   padding: 0;
@@ -2281,14 +3262,83 @@ button {
   pointer-events: none;
 }
 
+.rich-editor p {
+  min-height: 1.9em;
+  margin: 0 0 8px;
+}
+
+.rich-editor h1,
+.rich-editor h2,
+.rich-editor h3 {
+  margin: 18px 0 10px;
+  line-height: 1.25;
+}
+
+.rich-editor blockquote {
+  margin: 12px 0;
+  padding-left: 14px;
+  border-left: 3px solid #dededb;
+  color: #6f6e69;
+}
+
+.rich-editor hr {
+  height: 1px;
+  margin: 20px 0;
+  border: 0;
+  background: #ededeb;
+}
+
+.image-block {
+  position: relative;
+  display: block;
+  width: 100%;
+  margin: 8px 0;
+  padding: 4px 0;
+  user-select: none;
+}
+
 .rich-editor img,
 .note-image {
   display: block;
   max-width: 100%;
   height: auto;
-  margin: 14px 0;
+  margin: 0 auto;
   border: 1px solid #e8e8e5;
   border-radius: 10px;
+  cursor: pointer;
+}
+
+.note-image.is-selected {
+  outline: 3px solid #2f80ed;
+  outline-offset: 3px;
+}
+
+.note-image.image-small {
+  width: 38%;
+}
+
+.note-image.image-medium {
+  width: 66%;
+}
+
+.note-image.image-full {
+  width: 100%;
+}
+
+.image-spacer {
+  min-height: 28px;
+  margin: 2px 0;
+  border-radius: 7px;
+  cursor: text;
+}
+
+.image-spacer:hover {
+  background: #fafafa;
+}
+
+.tab-space {
+  display: inline-block;
+  width: 2em;
 }
 
 .editor-toolbar {
@@ -2318,7 +3368,19 @@ button {
 }
 
 .hidden-file-input {
-  display: none;
+  position: fixed;
+  top: 0;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.editor-toolbar button:disabled,
+.wide-tool-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .note-editor::placeholder,
@@ -2385,6 +3447,142 @@ button {
 
 .stat-list strong {
   color: #37352f;
+}
+
+.inspector-title-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.small-panel-toggle {
+  display: grid;
+  width: 24px !important;
+  height: 24px !important;
+  place-items: center;
+}
+
+.format-panel {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid #e4e4e1;
+  border-radius: 10px;
+  background: #fbfbfa;
+}
+
+.format-panel-title {
+  color: #787774;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.format-select {
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid #dededb;
+  border-radius: 6px;
+  background: white;
+  color: #37352f;
+  font-size: 11px;
+}
+
+.format-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.format-grid button,
+.emoji-row button,
+.wide-tool-button {
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid #dededb;
+  border-radius: 6px;
+  background: white;
+  color: #5f5e5b;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.format-grid button:hover,
+.emoji-row button:hover,
+.wide-tool-button:hover {
+  background: #f1f1ef;
+  color: #37352f;
+}
+
+.color-tools {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.color-tools label {
+  display: grid;
+  gap: 5px;
+  color: #787774;
+  font-size: 10px;
+}
+
+.color-tools input {
+  width: 100%;
+  height: 30px;
+  padding: 2px;
+  border: 1px solid #dededb;
+  border-radius: 6px;
+  background: white;
+}
+
+.emoji-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+
+.wide-tool-button {
+  width: 100%;
+}
+
+.selected-image-tools {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid #e8e8e5;
+}
+
+.image-insert-tools {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.image-insert-tools button {
+  min-height: 30px;
+  padding: 0 7px;
+  border: 1px solid #dededb;
+  border-radius: 6px;
+  background: white;
+  color: #5f5e5b;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.image-insert-tools button:hover {
+  background: #f7f7f5;
+}
+
+.compact-grid {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.format-grid .danger-tool {
+  color: #d44c47;
 }
 
 .property-field {

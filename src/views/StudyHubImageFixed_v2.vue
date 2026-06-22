@@ -724,7 +724,9 @@ async function handleImagePick(event) {
     if (insertedCount) {
       updateRichContent();
       showToast(
-        insertedCount === 1 ? "Image added" : `${insertedCount} images added`,
+        insertedCount === 1
+          ? "Image added"
+          : `${insertedCount} images added`,
       );
     }
   } catch (error) {
@@ -765,7 +767,9 @@ async function handleEditorPaste(event) {
     if (insertedCount) {
       updateRichContent();
       showToast(
-        insertedCount === 1 ? "Image pasted" : `${insertedCount} images pasted`,
+        insertedCount === 1
+          ? "Image pasted"
+          : `${insertedCount} images pasted`,
       );
     }
   } catch (error) {
@@ -804,7 +808,9 @@ async function handleEditorDrop(event) {
     if (insertedCount) {
       updateRichContent();
       showToast(
-        insertedCount === 1 ? "Image added" : `${insertedCount} images added`,
+        insertedCount === 1
+          ? "Image added"
+          : `${insertedCount} images added`,
       );
     }
   } catch (error) {
@@ -858,8 +864,7 @@ function createLocalImageDataUrl(file) {
           const context = canvas.getContext("2d");
           context.drawImage(image, 0, 0, width, height);
 
-          const outputType =
-            file.type === "image/png" ? "image/png" : "image/jpeg";
+          const outputType = file.type === "image/png" ? "image/png" : "image/jpeg";
           const compressedDataUrl = canvas.toDataURL(outputType, 0.82);
           resolve(compressedDataUrl || originalDataUrl);
         } catch (error) {
@@ -2064,11 +2069,7 @@ function buildLocalReview() {
           </div>
 
           <div class="editor-toolbar">
-            <button
-              type="button"
-              :disabled="imageBusy"
-              @click="openImagePicker('cursor')"
-            >
+            <button type="button" :disabled="imageBusy" @click="openImagePicker('cursor')">
               {{ imageBusy ? "Adding image…" : "Add image" }}
             </button>
             <span>Paste screenshots or images directly into the note.</span>
